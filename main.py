@@ -3,6 +3,7 @@ import logging
 import os
 import json
 import random
+from aiohttp import web # Добавили библиотеку для "обманки"
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import CommandStart
 from aiogram.enums import ParseMode
@@ -10,147 +11,140 @@ from aiogram.client.bot import DefaultBotProperties
 from google import genai
 from google.genai import types as g_types
 
-# =============== НАСТРОЙКИ ===============
-# 1. Читаем ключи из настроек сервера (Render)
-TG_TOKEN = os.getenv("TELEGRAM_TOKEN")
-GEMINI_KEY = os.getenv("GEMINI_API_KEY")
+# =============== НАСТРОЙКИ (ЧИТАЕМ 4 КЛЮЧА) ===============
+TG_TOKEN_NOIR = os.getenv("TG_TOKEN_NOIR")
+GEMINI_KEY_NOIR = os.getenv("GEMINI_KEY_NOIR")
+TG_TOKEN_SOUL = os.getenv("TG_TOKEN_SOUL")
+GEMINI_KEY_SOUL = os.getenv("GEMINI_KEY_SOUL")
 
-# 2. Проверяем, на месте ли ключи
-if not TG_TOKEN or not GEMINI_KEY:
-    raise ValueError("❌ ОШИБКА: Ключи не найдены! Проверь Environment Variables на Render.")
+# Если ключей нет, код не упадет сразу, но выведет ошибку в лог
+if not all([TG_TOKEN_NOIR, GEMINI_KEY_NOIR, TG_TOKEN_SOUL, GEMINI_KEY_SOUL]):
+    logging.error("❌ ВНИМАНИЕ! Не все ключи найдены. Проверь Environment Variables!")
 
-# 3. ИСПОЛЬЗУЕМ РАБОЧУЮ МОДЕЛЬ (исправлено)
-MODEL_ID = "gemini-flash-latest" 
-
+MODEL_ID = "gemini-flash-latest"
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
 
-# Инициализация бота
-bot = Bot(token=TG_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN))
-dp = Dispatcher()
-client = None # Клиент Gemini будет создан при запуске
+# =============== ЛОГИКА 1: ДЕТЕКТИВ ===============
+bot_noir = Bot(token=TG_TOKEN_NOIR, default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN))
+dp_noir = Dispatcher()
+client_noir = None
+histories_noir = {}
 
-# Хранилище истории диалогов (в памяти)
-user_histories = {}
-
-SYSTEM_INSTRUCTION = """
-Ты — ведущий текстового квеста в жанре "Нуар-Детектив" (1940-е, дождь, джаз, ч/б кино).
-Твоя задача:
-1. Вести игру, описывать сцены мрачно и атмосферно.
-2. Предлагать игроку выбор или спрашивать "Твои действия?".
-3. К КАЖДОМУ ОТВЕТУ (БЕЗ ИСКЛЮЧЕНИЙ) генерировать image_prompt на АНГЛИЙСКОМ. Даже если сцена не изменилась — опиши эмоции героя, деталь интерьера или лицо собеседника. КАРТИНКА НУЖНА ВСЕГДА.
-
-ТЫ ОБЯЗАН ОТВЕЧАТЬ СТРОГО В ФОРМАТЕ JSON:
-{
-  "text": "Текст сюжета на русском языке...",
-  "image_prompt": "visual description of the scene, noir style, black and white, dramatic lighting, 8k"
-}
+SYSTEM_NOIR = """
+Ты — ведущий квеста "Нуар-Детектив".
+1. Описывай сцены мрачно.
+2. К КАЖДОМУ ОТВЕТУ генерируй image_prompt на АНГЛИЙСКОМ.
+3. ОТВЕЧАЙ ТОЛЬКО В JSON: { "text": "...", "image_prompt": "..." }
 """
 
-async def generate_response(user_id, user_input):
-    """Отправляет запрос в Gemini и получает JSON с сюжетом и картинкой"""
+async def generate_noir(user_id, text):
     try:
-        # Если пользователя нет в базе — создаем пустую историю
-        if user_id not in user_histories:
-            user_histories[user_id] = []
+        if user_id not in histories_noir: histories_noir[user_id] = []
+        histories_noir[user_id].append(g_types.Content(role="user", parts=[g_types.Part.from_text(text=text)]))
+        if len(histories_noir[user_id]) > 20: histories_noir[user_id] = histories_noir[user_id][-20:]
 
-        # Добавляем сообщение игрока в историю
-        user_histories[user_id].append(
-            g_types.Content(role="user", parts=[g_types.Part.from_text(text=user_input)])
+        resp = client_noir.models.generate_content(
+            model=MODEL_ID, contents=histories_noir[user_id],
+            config=g_types.GenerateContentConfig(system_instruction=SYSTEM_NOIR, response_mime_type="application/json")
         )
-
-        # Ограничиваем память (последние 20 сообщений), чтобы не перегружать
-        if len(user_histories[user_id]) > 20:
-            user_histories[user_id] = user_histories[user_id][-20:]
-
-        # Запрос к Gemini
-        response = client.models.generate_content(
-            model=MODEL_ID,
-            contents=user_histories[user_id],
-            config=g_types.GenerateContentConfig(
-                system_instruction=SYSTEM_INSTRUCTION,
-                response_mime_type="application/json" # Заставляем отвечать JSON-ом
-            )
-        )
-        
-        # Разбираем ответ (JSON -> Python)
-        result_json = json.loads(response.text)
-        story_text = result_json.get("text", "Ошибка генерации текста.")
-        img_prompt = result_json.get("image_prompt", None)
-
-        # Сохраняем ответ бота в историю
-        user_histories[user_id].append(
-            g_types.Content(role="model", parts=[g_types.Part.from_text(text=response.text)])
-        )
-
-        return story_text, img_prompt
-
+        res_json = json.loads(resp.text)
+        histories_noir[user_id].append(g_types.Content(role="model", parts=[g_types.Part.from_text(text=resp.text)]))
+        return res_json.get("text"), res_json.get("image_prompt")
     except Exception as e:
-        logging.error(f"Gemini Error: {e}")
-        # Если произошла ошибка, возвращаем текст ошибки, чтобы ты видел в боте
-        return f"🕵️‍♂️ *Сбой в архивах...* (Ошибка: {e})", None
+        return f"🕵️‍♂️ *Сбой связи...* ({e})", None
 
 def get_image_url(prompt):
-    """Создает ссылку на картинку через Pollinations (бесплатно)"""
-    if not prompt:
-        return None
-    # Очищаем промпт для URL
-    clean_prompt = prompt.replace(" ", "%20")
+    if not prompt: return None
     seed = random.randint(1, 10000)
-    # Формируем ссылку
-    url = f"https://image.pollinations.ai/prompt/{clean_prompt}%20noir%20style%20monochrome?width=1024&height=1024&seed={seed}&nologo=true"
-    return url
+    return f"https://image.pollinations.ai/prompt/{prompt.replace(' ', '%20')}%20noir%20style?width=1024&height=1024&seed={seed}&nologo=true"
 
-# --- ОБРАБОТЧИКИ СООБЩЕНИЙ ---
+@dp_noir.message(CommandStart())
+async def start_noir(msg: types.Message):
+    histories_noir[msg.from_user.id] = []
+    text, prompt = await generate_noir(msg.from_user.id, "Начни игру. Я детектив.")
+    if prompt: await msg.answer_photo(get_image_url(prompt), caption=text)
+    else: await msg.answer(text)
 
-@dp.message(CommandStart())
-async def cmd_start(message: types.Message):
-    # Очищаем историю при старте
-    user_histories[message.from_user.id] = []
-    
-    await message.answer("🎷 *Загрузка дела...*")
-    
-    # Первый ход игры
-    text, img_prompt = await generate_response(message.from_user.id, "Начни игру. Я детектив, сижу в своем кабинете, идет дождь.")
-    
-    # Отправка ответа
-    if img_prompt:
-        await message.answer_photo(
-            photo=get_image_url(img_prompt),
-            caption=text
+@dp_noir.message()
+async def msg_noir(msg: types.Message):
+    await bot_noir.send_chat_action(msg.chat.id, "upload_photo")
+    text, prompt = await generate_noir(msg.from_user.id, msg.text)
+    if prompt: await msg.answer_photo(get_image_url(prompt), caption=text)
+    else: await msg.answer(text)
+
+# =============== ЛОГИКА 2: ПСИХОЛОГ СОУЛ ===============
+bot_soul = Bot(token=TG_TOKEN_SOUL, default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN))
+dp_soul = Dispatcher()
+client_soul = None
+histories_soul = {}
+
+SYSTEM_SOUL = """
+Ты — друг Соул. Тон: теплый, поддерживающий.
+Задавай вопросы. Отвечай обычным текстом.
+"""
+
+async def generate_soul(user_id, text):
+    try:
+        if user_id not in histories_soul: histories_soul[user_id] = []
+        histories_soul[user_id].append(g_types.Content(role="user", parts=[g_types.Part.from_text(text=text)]))
+        if len(histories_soul[user_id]) > 40: histories_soul[user_id] = histories_soul[user_id][-40:]
+
+        resp = client_soul.models.generate_content(
+            model=MODEL_ID, contents=histories_soul[user_id],
+            config=g_types.GenerateContentConfig(system_instruction=SYSTEM_SOUL)
         )
-    else:
-        await message.answer(text)
+        histories_soul[user_id].append(g_types.Content(role="model", parts=[g_types.Part.from_text(text=resp.text)]))
+        return resp.text
+    except Exception as e:
+        return "Прости, я отвлекся... Повтори? (Ошибка сети)"
 
-@dp.message()
-async def handle_all_messages(message: types.Message):
-    # Показываем статус "отправка фото", чтобы юзер понимал, что бот думает
-    await bot.send_chat_action(chat_id=message.chat.id, action="upload_photo")
-    
-    text, img_prompt = await generate_response(message.from_user.id, message.text)
-    
-    if img_prompt:
-        try:
-            await message.answer_photo(
-                photo=get_image_url(img_prompt),
-                caption=text
-            )
-        except Exception as e:
-            logging.error(f"Ошибка отправки фото: {e}")
-            await message.answer(text) # Если фото не грузится, шлем просто текст
-    else:
-        await message.answer(text)
+@dp_soul.message(CommandStart())
+async def start_soul(msg: types.Message):
+    histories_soul[msg.from_user.id] = []
+    await msg.answer("Привет! Я Соул. Как ты? ☕️")
 
-# --- ГЛАВНАЯ ФУНКЦИЯ ЗАПУСКА ---
+@dp_soul.message()
+async def msg_soul(msg: types.Message):
+    await bot_soul.send_chat_action(msg.chat.id, "typing")
+    ans = await generate_soul(msg.from_user.id, msg.text)
+    await msg.answer(ans)
+
+# =============== "ОБМАНКА" ДЛЯ RENDER ===============
+async def health_check(request):
+    return web.Response(text="Bot is alive!")
+
+async def start_dummy_server():
+    # Создаем мини-сайт, который просто говорит "Я жив"
+    app = web.Application()
+    app.router.add_get('/', health_check)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    # Render сам выдает порт через переменную PORT, используем его
+    port = int(os.getenv("PORT", 8080))
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+    logging.info(f"✅ Фейковый сервер запущен на порту {port}")
+
+# =============== ГЛАВНЫЙ ЗАПУСК ===============
 async def main():
-    global client
-    # Инициализация клиента Google Gemini
-    client = genai.Client(api_key=GEMINI_KEY)
+    global client_noir, client_soul
     
-    logging.info(f"✅ Бот запущен! Используем модель: {MODEL_ID}")
-    await dp.start_polling(bot)
+    # Инициализируем Gemini клиентов
+    if GEMINI_KEY_NOIR: client_noir = genai.Client(api_key=GEMINI_KEY_NOIR)
+    if GEMINI_KEY_SOUL: client_soul = genai.Client(api_key=GEMINI_KEY_SOUL)
+
+    # 1. Запускаем "обманку" (веб-сервер)
+    await start_dummy_server()
+
+    # 2. Запускаем обоих ботов
+    logging.info("🚀 ЗАПУСК МУЛЬТИ-СИСТЕМЫ...")
+    await asyncio.gather(
+        dp_noir.start_polling(bot_noir),
+        dp_soul.start_polling(bot_soul)
+    )
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
-        logging.info("Бот остановлен")
+        logging.info("Боты остановлены")
