@@ -21,7 +21,7 @@ def log_key_status(name, key):
     if key: logging.info(f"✅ {name} найден: {key[:4]}...")
     else: logging.error(f"❌ {name} НЕ НАЙДЕН!")
 
-MODEL_ID = "gemini-flash-latest"
+model = genai.GenerativeModel('gemini-1.5-flash')
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
 
 # =============== ЛОГИКА 1: ДЕТЕКТИВ (LITE) ===============
