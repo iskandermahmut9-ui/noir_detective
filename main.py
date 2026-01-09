@@ -2,65 +2,65 @@ import asyncio
 import logging
 import os
 import random
-import google.generativeai as genai 
 from aiohttp import web
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import CommandStart
 from aiogram.enums import ParseMode
 from aiogram.client.bot import DefaultBotProperties
-from google.api_core import exceptions as google_exceptions
+from groq import AsyncGroq  # ✅ Используем Groq вместо Google
 
 # =============== НАСТРОЙКИ ===============
 TG_TOKEN_NOIR = os.getenv("TG_TOKEN_NOIR")
-GEMINI_KEY_NOIR = os.getenv("GEMINI_KEY_NOIR")
 TG_TOKEN_SOUL = os.getenv("TG_TOKEN_SOUL")
-GEMINI_KEY_SOUL = os.getenv("GEMINI_KEY_SOUL")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY") # 🔑 Новый общий ключ для AI
 
-# 🚨 ВАЖНО: Мы переходим на самую базовую модель. Она есть у всех.
-# Если заработает она - значит проблема была в доступах к Flash.
-MODEL_NAME = "gemini-pro"
+# Модель Llama 3 (Умная и быстрая)
+MODEL_NAME = "llama3-70b-8192" 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
-genai_lock = asyncio.Lock()
+
+# Клиент Groq
+client = None
+if GROQ_API_KEY:
+    client = AsyncGroq(api_key=GROQ_API_KEY)
+else:
+    logging.error("❌ GROQ_API_KEY НЕ НАЙДЕН! БОТЫ БУДУТ МОЛЧАТЬ.")
 
 # =============== ЛОГИКА 1: ДЕТЕКТИВ (NOIR) ===============
 bot_noir = Bot(token=TG_TOKEN_NOIR, default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN))
 dp_noir = Dispatcher()
 histories_noir = {}
 
-SYSTEM_NOIR = "Роль: Нуар-детектив. Стиль: краткий, циничный, 1940-е."
+SYSTEM_NOIR = "Ты — ведущий квеста 'Нуар-Детектив'. Атмосфера 1940-х, дождь, джаз. Ты циничен, краток и мрачен. Не используй списки, пиши живым текстом."
 
 async def generate_noir(user_id, text):
-    if not GEMINI_KEY_NOIR: return "🕵️‍♂️ Нет ключа."
+    if not client: return "🕵️‍♂️ Ошибка: Нет ключа Groq."
     
     if user_id not in histories_noir: 
         histories_noir[user_id] = [
-            {"role": "user", "parts": ["Ты детектив?"]},
-            {"role": "model", "parts": ["Да. И у меня похмелье."]}
+            {"role": "system", "content": SYSTEM_NOIR},
+            {"role": "assistant", "content": "Дело дрянь. Дождь смывает все улики..."}
         ]
-    histories_noir[user_id].append({"role": "user", "parts": [text]})
-    # Держим короткую память для стабильности
-    if len(histories_noir[user_id]) > 10: histories_noir[user_id] = histories_noir[user_id][-10:]
+    
+    histories_noir[user_id].append({"role": "user", "content": text})
+    # Память: держим последние 10 сообщений + системный промпт
+    if len(histories_noir[user_id]) > 12: 
+        histories_noir[user_id] = [histories_noir[user_id][0]] + histories_noir[user_id][-10:]
 
-    async with genai_lock:
-        try:
-            genai.configure(api_key=GEMINI_KEY_NOIR)
-            model = genai.GenerativeModel(MODEL_NAME) # Без системной инструкции (для совместимости)
-            
-            # Добавляем промпт прямо в сообщение
-            full_prompt = f"{SYSTEM_NOIR}\nUser: {text}"
-            
-            chat = model.start_chat(history=histories_noir[user_id][:-1])
-            response = await chat.send_message_async(full_prompt)
-            
-            ans = response.text
-            histories_noir[user_id].append({"role": "model", "parts": [ans]})
-            return ans
-        except Exception as e:
-            logging.error(f"Error Noir: {e}")
-            return f"🕵️‍♂️ Ошибка: {e}"
+    try:
+        completion = await client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=histories_noir[user_id],
+            temperature=0.7,
+            max_tokens=300
+        )
+        ans = completion.choices[0].message.content
+        histories_noir[user_id].append({"role": "assistant", "content": ans})
+        return ans
+    except Exception as e:
+        logging.error(f"Error Noir: {e}")
+        return f"🕵️‍♂️ Сбой связи: {e}"
 
-# ✅ ИСПРАВЛЕНА ССЫЛКА НА КАРТИНКУ (Pollinations New API)
 def get_start_image():
     seed = random.randint(1, 10000)
     return f"https://image.pollinations.ai/prompt/detective%20office%20rain%20noir?width=1024&height=1024&seed={seed}&nologo=true"
@@ -68,8 +68,8 @@ def get_start_image():
 @dp_noir.message(CommandStart())
 async def start_noir(msg: types.Message):
     histories_noir[msg.from_user.id] = []
-    await msg.answer_photo(get_start_image(), caption="🎷 *Дело открыто... (Версия Pro)*")
-    text = await generate_noir(msg.from_user.id, "Кто ты?")
+    await msg.answer_photo(get_start_image(), caption="🎷 *Дело открыто...*")
+    text = await generate_noir(msg.from_user.id, "Введи меня в курс дела.")
     await msg.answer(text)
 
 @dp_noir.message()
@@ -83,34 +83,38 @@ bot_soul = Bot(token=TG_TOKEN_SOUL, default=DefaultBotProperties(parse_mode=Pars
 dp_soul = Dispatcher()
 histories_soul = {}
 
-SYSTEM_SOUL = "Роль: Друг-психолог. Стиль: теплый, добрый."
+SYSTEM_SOUL = "Ты — друг Соул. Тон: теплый, поддерживающий, эмпатичный. Внимательно слушай и задавай мягкие вопросы."
 
 async def generate_soul(user_id, text):
-    if not GEMINI_KEY_SOUL: return "⚠️ Нет ключа."
-    if user_id not in histories_soul: histories_soul[user_id] = []
-    histories_soul[user_id].append({"role": "user", "parts": [text]})
-    if len(histories_soul[user_id]) > 10: histories_soul[user_id] = histories_soul[user_id][-10:]
+    if not client: return "⚠️ Ошибка: Нет ключа Groq."
 
-    async with genai_lock:
-        try:
-            genai.configure(api_key=GEMINI_KEY_SOUL)
-            model = genai.GenerativeModel(MODEL_NAME)
-            
-            full_prompt = f"{SYSTEM_SOUL}\nUser: {text}"
-            
-            chat = model.start_chat(history=histories_soul[user_id][:-1])
-            response = await chat.send_message_async(full_prompt)
-            ans = response.text
-            histories_soul[user_id].append({"role": "model", "parts": [ans]})
-            return ans
-        except Exception as e:
-            logging.error(f"Error Soul: {e}")
-            return f"Ошибка: {e}"
+    if user_id not in histories_soul: 
+        histories_soul[user_id] = [
+            {"role": "system", "content": SYSTEM_SOUL}
+        ]
+    
+    histories_soul[user_id].append({"role": "user", "content": text})
+    if len(histories_soul[user_id]) > 12: 
+        histories_soul[user_id] = [histories_soul[user_id][0]] + histories_soul[user_id][-10:]
+
+    try:
+        completion = await client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=histories_soul[user_id],
+            temperature=0.7,
+            max_tokens=300
+        )
+        ans = completion.choices[0].message.content
+        histories_soul[user_id].append({"role": "assistant", "content": ans})
+        return ans
+    except Exception as e:
+        logging.error(f"Error Soul: {e}")
+        return f"Я тебя не слышу... (Ошибка: {e})"
 
 @dp_soul.message(CommandStart())
 async def start_soul(msg: types.Message):
     histories_soul[msg.from_user.id] = []
-    await msg.answer("Привет! Я Соул. (Версия Pro) ☕️")
+    await msg.answer("Привет! Я Соул. Как ты себя чувствуешь сегодня? ☕️")
 
 @dp_soul.message()
 async def msg_soul(msg: types.Message):
@@ -119,7 +123,7 @@ async def msg_soul(msg: types.Message):
     await msg.answer(ans)
 
 # =============== ЗАПУСК ===============
-async def health_check(request): return web.Response(text="Bots Alive")
+async def health_check(request): return web.Response(text="Bots Alive (Groq)")
 
 async def start_dummy_server():
     app = web.Application()
@@ -131,13 +135,17 @@ async def start_dummy_server():
     await site.start()
 
 async def main():
-    logging.info("--- ЗАПУСК GEMINI PRO (SAFETY MODE) ---")
+    logging.info("--- ЗАПУСК НА GROQ (LLAMA 3) ---")
     await start_dummy_server()
-    # Удаляем старые вебхуки, чтобы убрать конфликт
+    
+    # Удаляем вебхуки, чтобы убить старые конфликты
     await bot_noir.delete_webhook(drop_pending_updates=True)
     await bot_soul.delete_webhook(drop_pending_updates=True)
-    
-    await asyncio.gather(dp_noir.start_polling(bot_noir), dp_soul.start_polling(bot_soul))
+
+    await asyncio.gather(
+        dp_noir.start_polling(bot_noir),
+        dp_soul.start_polling(bot_soul)
+    )
 
 if __name__ == "__main__":
     try: asyncio.run(main())
