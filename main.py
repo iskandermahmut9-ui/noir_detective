@@ -3,7 +3,7 @@ import logging
 import os
 import json
 import random
-from aiogram import Bot, Dispatcher, types, F
+from aiogram import Bot, Dispatcher, types
 from aiogram.filters import CommandStart
 from aiogram.enums import ParseMode
 from aiogram.client.bot import DefaultBotProperties
@@ -11,37 +11,36 @@ from google import genai
 from google.genai import types as g_types
 
 # =============== НАСТРОЙКИ ===============
-# os.getenv берет ключ из настроек сервера (Render), а не из этого файла
+# 1. Читаем ключи из настроек сервера (Render)
 TG_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GEMINI_KEY = os.getenv("GEMINI_API_KEY")
 
-# Проверка на всякий случай
-if not TG_TOKEN:
-    print("Ошибка: Токен Telegram не найден!")
-if not GEMINI_KEY:
-    print("Ошибка: Ключ Gemini не найден!")
+# 2. Проверяем, на месте ли ключи
+if not TG_TOKEN or not GEMINI_KEY:
+    raise ValueError("❌ ОШИБКА: Ключи не найдены! Проверь Environment Variables на Render.")
 
-# Настройка модели
-MODEL_ID = "gemini-1.5-flash" # Рабочая лошадка
+# 3. ИСПОЛЬЗУЕМ РАБОЧУЮ МОДЕЛЬ (исправлено)
+MODEL_ID = "gemini-flash-latest" 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
 
-bot = Bot(token=TG_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+# Инициализация бота
+bot = Bot(token=TG_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN))
 dp = Dispatcher()
-client = None # Инициализируем позже
+client = None # Клиент Gemini будет создан при запуске
 
-# Хранилище истории (в памяти для MVP)
+# Хранилище истории диалогов (в памяти)
 user_histories = {}
 
-# --- СИСТЕМНЫЙ ПРОМПТ ---
+# --- СИСТЕМНАЯ ИНСТРУКЦИЯ (МОЗГИ БОТА) ---
 SYSTEM_INSTRUCTION = """
-Ты — ведущий текстового квеста в жанре "Нуар-Детектив" (1940-е, дождь, джаз, черно-белое кино).
+Ты — ведущий текстового квеста в жанре "Нуар-Детектив" (1940-е, дождь, джаз, ч/б кино).
 Твоя задача:
 1. Вести игру, описывать сцены мрачно и атмосферно.
 2. Предлагать игроку выбор или спрашивать "Твои действия?".
-3. Генерировать описание для картинки (image_prompt) на АНГЛИЙСКОМ языке, описывающее текущую сцену.
+3. Генерировать описание для картинки (image_prompt) на АНГЛИЙСКОМ языке.
 
-ТЫ ОБЯЗАН ОТВЕЧАТЬ В ФОРМАТЕ JSON:
+ТЫ ОБЯЗАН ОТВЕЧАТЬ СТРОГО В ФОРМАТЕ JSON:
 {
   "text": "Текст сюжета на русском языке...",
   "image_prompt": "visual description of the scene, noir style, black and white, dramatic lighting, 8k"
@@ -49,18 +48,18 @@ SYSTEM_INSTRUCTION = """
 """
 
 async def generate_response(user_id, user_input):
-    """Генерация ответа через Gemini с памятью"""
+    """Отправляет запрос в Gemini и получает JSON с сюжетом и картинкой"""
     try:
-        # Инициализация истории, если нет
+        # Если пользователя нет в базе — создаем пустую историю
         if user_id not in user_histories:
             user_histories[user_id] = []
 
-        # Добавляем сообщение юзера
+        # Добавляем сообщение игрока в историю
         user_histories[user_id].append(
             g_types.Content(role="user", parts=[g_types.Part.from_text(text=user_input)])
         )
 
-        # Ограничиваем память (последние 20 сообщений, чтобы не забить контекст)
+        # Ограничиваем память (последние 20 сообщений), чтобы не перегружать
         if len(user_histories[user_id]) > 20:
             user_histories[user_id] = user_histories[user_id][-20:]
 
@@ -70,14 +69,14 @@ async def generate_response(user_id, user_input):
             contents=user_histories[user_id],
             config=g_types.GenerateContentConfig(
                 system_instruction=SYSTEM_INSTRUCTION,
-                response_mime_type="application/json" # ВАЖНО: Форсируем JSON
+                response_mime_type="application/json" # Заставляем отвечать JSON-ом
             )
         )
         
-        # Парсим ответ
+        # Разбираем ответ (JSON -> Python)
         result_json = json.loads(response.text)
         story_text = result_json.get("text", "Ошибка генерации текста.")
-        img_prompt = result_json.get("image_prompt", "noir detective city")
+        img_prompt = result_json.get("image_prompt", None)
 
         # Сохраняем ответ бота в историю
         user_histories[user_id].append(
@@ -88,41 +87,44 @@ async def generate_response(user_id, user_input):
 
     except Exception as e:
         logging.error(f"Gemini Error: {e}")
-        return "🕵️‍♂️ *Архивы повреждены...* (Ошибка AI, попробуй еще раз).", None
+        # Если произошла ошибка, возвращаем текст ошибки, чтобы ты видел в боте
+        return f"🕵️‍♂️ *Сбой в архивах...* (Ошибка: {e})", None
 
 def get_image_url(prompt):
-    """Генерация ссылки на картинку через Pollinations (бесплатно, без ключей)"""
-    # Очищаем промпт и кодируем для URL
+    """Создает ссылку на картинку через Pollinations (бесплатно)"""
+    if not prompt:
+        return None
+    # Очищаем промпт для URL
     clean_prompt = prompt.replace(" ", "%20")
-    # Добавляем seed, чтобы картинки были разными
     seed = random.randint(1, 10000)
-    # Формируем URL. Pollinations генерирует на лету.
+    # Формируем ссылку
     url = f"https://image.pollinations.ai/prompt/{clean_prompt}%20noir%20style%20monochrome?width=1024&height=1024&seed={seed}&nologo=true"
     return url
 
-# --- ОБРАБОТЧИКИ ---
+# --- ОБРАБОТЧИКИ СООБЩЕНИЙ ---
 
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message):
-    user_histories[message.from_user.id] = [] # Сброс истории
-    await message.answer("🎷 *Игра началась...*")
+    # Очищаем историю при старте
+    user_histories[message.from_user.id] = []
     
-    # Первый ход
-    text, img_prompt = await generate_response(message.from_user.id, "Начни игру. Я детектив в своем кабинете.")
+    await message.answer("🎷 *Загрузка дела...*")
     
+    # Первый ход игры
+    text, img_prompt = await generate_response(message.from_user.id, "Начни игру. Я детектив, сижу в своем кабинете, идет дождь.")
+    
+    # Отправка ответа
     if img_prompt:
-        # Отправляем фото с подписью
         await message.answer_photo(
             photo=get_image_url(img_prompt),
-            caption=text,
-            parse_mode=ParseMode.MARKDOWN
+            caption=text
         )
     else:
         await message.answer(text)
 
 @dp.message()
 async def handle_all_messages(message: types.Message):
-    # Показываем статус "печатает..."
+    # Показываем статус "отправка фото", чтобы юзер понимал, что бот думает
     await bot.send_chat_action(chat_id=message.chat.id, action="upload_photo")
     
     text, img_prompt = await generate_response(message.from_user.id, message.text)
@@ -131,24 +133,25 @@ async def handle_all_messages(message: types.Message):
         try:
             await message.answer_photo(
                 photo=get_image_url(img_prompt),
-                caption=text,
-                parse_mode=ParseMode.MARKDOWN
+                caption=text
             )
         except Exception as e:
-            # Если картинка не загрузилась, шлем просто текст
-            logging.error(f"Image Error: {e}")
-            await message.answer(text)
+            logging.error(f"Ошибка отправки фото: {e}")
+            await message.answer(text) # Если фото не грузится, шлем просто текст
     else:
         await message.answer(text)
 
-# --- ЗАПУСК ---
+# --- ГЛАВНАЯ ФУНКЦИЯ ЗАПУСКА ---
 async def main():
     global client
-    # Инициализация клиента Gemini
+    # Инициализация клиента Google Gemini
     client = genai.Client(api_key=GEMINI_KEY)
     
-    logging.info("✅ Бот Нуар-Детектив запущен!")
+    logging.info(f"✅ Бот запущен! Используем модель: {MODEL_ID}")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        logging.info("Бот остановлен")
