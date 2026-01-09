@@ -5,17 +5,14 @@ import random
 from aiohttp import web
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import CommandStart
-from aiogram.enums import ParseMode
-from aiogram.client.bot import DefaultBotProperties
-from groq import AsyncGroq  # ✅ Используем Groq вместо Google
+from groq import AsyncGroq
 
 # =============== НАСТРОЙКИ ===============
 TG_TOKEN_NOIR = os.getenv("TG_TOKEN_NOIR")
 TG_TOKEN_SOUL = os.getenv("TG_TOKEN_SOUL")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY") # 🔑 Новый общий ключ для AI
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-# Модель Llama 3 (Умная и быстрая)
-MODEL_NAME = "llama3-70b-8192" 
+MODEL_NAME = "llama3-70b-8192"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
 
@@ -24,26 +21,26 @@ client = None
 if GROQ_API_KEY:
     client = AsyncGroq(api_key=GROQ_API_KEY)
 else:
-    logging.error("❌ GROQ_API_KEY НЕ НАЙДЕН! БОТЫ БУДУТ МОЛЧАТЬ.")
+    logging.error("❌ КЛЮЧ GROQ НЕ НАЙДЕН!")
 
 # =============== ЛОГИКА 1: ДЕТЕКТИВ (NOIR) ===============
-bot_noir = Bot(token=TG_TOKEN_NOIR, default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN))
+# 🚨 ИСПРАВЛЕНИЕ: Убрали parse_mode, чтобы не было ошибок форматирования
+bot_noir = Bot(token=TG_TOKEN_NOIR) 
 dp_noir = Dispatcher()
 histories_noir = {}
 
-SYSTEM_NOIR = "Ты — ведущий квеста 'Нуар-Детектив'. Атмосфера 1940-х, дождь, джаз. Ты циничен, краток и мрачен. Не используй списки, пиши живым текстом."
+SYSTEM_NOIR = "Ты — ведущий квеста 'Нуар-Детектив'. Атмосфера 1940-х, дождь, цинизм. Пиши коротко и стильно."
 
 async def generate_noir(user_id, text):
-    if not client: return "🕵️‍♂️ Ошибка: Нет ключа Groq."
+    if not client: return "🕵️‍♂️ Мозг отключен (нет ключа Groq)."
     
     if user_id not in histories_noir: 
         histories_noir[user_id] = [
             {"role": "system", "content": SYSTEM_NOIR},
-            {"role": "assistant", "content": "Дело дрянь. Дождь смывает все улики..."}
+            {"role": "assistant", "content": "Дождь смывает следы..."}
         ]
     
     histories_noir[user_id].append({"role": "user", "content": text})
-    # Память: держим последние 10 сообщений + системный промпт
     if len(histories_noir[user_id]) > 12: 
         histories_noir[user_id] = [histories_noir[user_id][0]] + histories_noir[user_id][-10:]
 
@@ -68,7 +65,7 @@ def get_start_image():
 @dp_noir.message(CommandStart())
 async def start_noir(msg: types.Message):
     histories_noir[msg.from_user.id] = []
-    await msg.answer_photo(get_start_image(), caption="🎷 *Дело открыто...*")
+    await msg.answer_photo(get_start_image(), caption="🎷 Дело открыто...")
     text = await generate_noir(msg.from_user.id, "Введи меня в курс дела.")
     await msg.answer(text)
 
@@ -79,19 +76,18 @@ async def msg_noir(msg: types.Message):
     await msg.answer(text)
 
 # =============== ЛОГИКА 2: ПСИХОЛОГ (SOUL) ===============
-bot_soul = Bot(token=TG_TOKEN_SOUL, default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN))
+# 🚨 ИСПРАВЛЕНИЕ: Убрали parse_mode
+bot_soul = Bot(token=TG_TOKEN_SOUL)
 dp_soul = Dispatcher()
 histories_soul = {}
 
-SYSTEM_SOUL = "Ты — друг Соул. Тон: теплый, поддерживающий, эмпатичный. Внимательно слушай и задавай мягкие вопросы."
+SYSTEM_SOUL = "Ты — друг Соул. Поддерживай, сочувствуй, задавай вопросы."
 
 async def generate_soul(user_id, text):
-    if not client: return "⚠️ Ошибка: Нет ключа Groq."
+    if not client: return "⚠️ Нет ключа Groq."
 
     if user_id not in histories_soul: 
-        histories_soul[user_id] = [
-            {"role": "system", "content": SYSTEM_SOUL}
-        ]
+        histories_soul[user_id] = [{"role": "system", "content": SYSTEM_SOUL}]
     
     histories_soul[user_id].append({"role": "user", "content": text})
     if len(histories_soul[user_id]) > 12: 
@@ -109,12 +105,12 @@ async def generate_soul(user_id, text):
         return ans
     except Exception as e:
         logging.error(f"Error Soul: {e}")
-        return f"Я тебя не слышу... (Ошибка: {e})"
+        return f"Ошибка: {e}"
 
 @dp_soul.message(CommandStart())
 async def start_soul(msg: types.Message):
     histories_soul[msg.from_user.id] = []
-    await msg.answer("Привет! Я Соул. Как ты себя чувствуешь сегодня? ☕️")
+    await msg.answer("Привет! Я Соул. Как ты? ☕️")
 
 @dp_soul.message()
 async def msg_soul(msg: types.Message):
@@ -123,7 +119,7 @@ async def msg_soul(msg: types.Message):
     await msg.answer(ans)
 
 # =============== ЗАПУСК ===============
-async def health_check(request): return web.Response(text="Bots Alive (Groq)")
+async def health_check(request): return web.Response(text="Bots Alive")
 
 async def start_dummy_server():
     app = web.Application()
@@ -135,17 +131,13 @@ async def start_dummy_server():
     await site.start()
 
 async def main():
-    logging.info("--- ЗАПУСК НА GROQ (LLAMA 3) ---")
+    logging.info("--- ФИНАЛ: ЧИСТЫЙ ТЕКСТ (БЕЗ MARKDOWN) ---")
     await start_dummy_server()
     
-    # Удаляем вебхуки, чтобы убить старые конфликты
     await bot_noir.delete_webhook(drop_pending_updates=True)
     await bot_soul.delete_webhook(drop_pending_updates=True)
 
-    await asyncio.gather(
-        dp_noir.start_polling(bot_noir),
-        dp_soul.start_polling(bot_soul)
-    )
+    await asyncio.gather(dp_noir.start_polling(bot_noir), dp_soul.start_polling(bot_soul))
 
 if __name__ == "__main__":
     try: asyncio.run(main())
