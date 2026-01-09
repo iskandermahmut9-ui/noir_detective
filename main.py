@@ -2,9 +2,10 @@ import asyncio
 import logging
 import os
 import random
+import sys
 from aiohttp import web
 from aiogram import Bot, Dispatcher, types
-from aiogram.filters import CommandStart
+from aiogram.filters import Command, CommandStart
 from groq import AsyncGroq
 
 # =============== НАСТРОЙКИ ===============
@@ -12,18 +13,24 @@ TG_TOKEN_NOIR = os.getenv("TG_TOKEN_NOIR")
 TG_TOKEN_SOUL = os.getenv("TG_TOKEN_SOUL")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-# Llama 3.3
+# ✅ ИСПОЛЬЗУЕМ МОЩНУЮ МОДЕЛЬ, КАК ДОГОВАРИВАЛИСЬ
 MODEL_NAME = "llama-3.3-70b-versatile"
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
+# Настройка логов (чтобы видеть ошибки в консоли Render)
+logging.basicConfig(
+    level=logging.INFO, 
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
 
 client = None
 if GROQ_API_KEY:
     client = AsyncGroq(api_key=GROQ_API_KEY)
+    logging.info(f"✅ Groq Client запущен. Модель: {MODEL_NAME}")
 else:
     logging.error("❌ КЛЮЧ GROQ НЕ НАЙДЕН!")
 
-# =============== ЛОГИКА 1: ДЕТЕКТИВ (NOIR) - GAME MASTER ===============
+# =============== ЛОГИКА 1: ДЕТЕКТИВ (NOIR) ===============
 bot_noir = Bot(token=TG_TOKEN_NOIR)
 dp_noir = Dispatcher()
 histories_noir = {}
@@ -31,7 +38,6 @@ histories_noir = {}
 SYSTEM_NOIR = """
 ТЫ — ВЕДУЩИЙ ТЕКСТОВОЙ ИГРЫ В ЖАНРЕ НУАР (GAME MASTER).
 Цель: Вести игрока по сюжету расследования.
-
 ПРАВИЛА:
 1. НИКОГДА не выходи из роли. Ты — циничный детектив.
 2. ТЫ ВЕДЕШЬ. Ставь игрока перед выбором. "Идешь в бар или к вдове?"
@@ -40,26 +46,34 @@ SYSTEM_NOIR = """
 """
 
 async def generate_noir(user_id, text):
-    if not client: return "🕵️‍♂️ (Связь прервана)"
-    if user_id not in histories_noir: histories_noir[user_id] = []
+    logging.info(f"[Noir] Запрос: {text}")
+    if not client: return "🕵️‍♂️ (Нет связи с мозгом)"
     
+    if user_id not in histories_noir: histories_noir[user_id] = []
     histories_noir[user_id].append({"role": "user", "content": text})
+    
     messages = [{"role": "system", "content": SYSTEM_NOIR}] + histories_noir[user_id][-10:]
 
     try:
         completion = await client.chat.completions.create(
-            model=MODEL_NAME, messages=messages, temperature=0.8, max_tokens=300
+            model=MODEL_NAME, messages=messages, temperature=0.8, max_tokens=400
         )
         ans = completion.choices[0].message.content
+        logging.info(f"[Noir] Ответ: {ans[:30]}...")
         histories_noir[user_id].append({"role": "assistant", "content": ans})
         return ans
     except Exception as e:
-        logging.error(f"Error Noir: {e}")
-        return f"🕵️‍♂️ Сбой: {e}"
+        logging.error(f"[Noir] Ошибка: {e}")
+        return f"🕵️‍♂️ Сбой связи: {e}"
 
 def get_start_image():
     seed = random.randint(1, 10000)
     return f"https://image.pollinations.ai/prompt/detective%20office%20rain%20noir?width=1024&height=1024&seed={seed}&nologo=true"
+
+# КОМАНДА ПРОВЕРКИ СВЯЗИ (БЕЗ НЕЙРОСЕТИ)
+@dp_noir.message(Command("ping"))
+async def ping_noir(msg: types.Message):
+    await msg.answer("🕵️‍♂️ Понг! Связь с сервером есть.")
 
 @dp_noir.message(CommandStart())
 async def start_noir(msg: types.Message):
@@ -74,57 +88,51 @@ async def msg_noir(msg: types.Message):
     text = await generate_noir(msg.from_user.id, msg.text)
     await msg.answer(text)
 
-# =============== ЛОГИКА 2: ПСИХОЛОГ (SOUL) - БАЛАНС ===============
+# =============== ЛОГИКА 2: ПСИХОЛОГ (SOUL) ===============
 bot_soul = Bot(token=TG_TOKEN_SOUL)
 dp_soul = Dispatcher()
 histories_soul = {}
 
-# 🔥 НОВЫЙ ПРОМПТ: БАЛАНС (НЕ ДУШНЫЙ, НО И НЕ ПОФИГИСТ)
 SYSTEM_SOUL = """
 ТВОЯ РОЛЬ: Ты — Соул. Лучший друг, умный, теплый и спокойный.
 ТВОЯ ЦЕЛЬ: Поддерживать беседу так, чтобы пользователю стало уютно.
-
 КАК ТЫ ОБЩАЕШЬСЯ:
-1. **Пиши нормально.** Используй заглавные буквы и знаки препинания. Не пиши как подросток.
-2. **Не лезь в душу.** Не задавай вопросы "А что ты чувствуешь?" в лоб.
-3. **Не будь пофигистом.** Фразы типа "ну ок", "понятно" — ЗАПРЕЩЕНЫ.
-4. **Принцип "Эхо":** Если пользователь что-то рассказывает, сначала ПОДДЕРЖИ его мысль, а потом мягко добавь свою.
-5. **Теплота:** Твой тон должен быть как теплый плед. Заботливый, но ненавязчивый.
-
-ПРИМЕРЫ:
-Плохо: "понятно. приятного аппетита." (Холодно)
-Плохо: "А что именно ты будешь есть? Как это отражает твое настроение?" (Душно)
-Хорошо: "Звучит отлично. Горячий ужин после такого дня — это то, что доктор прописал. Отдыхай, ты заслужил."
-
-ТЫ — ДРУГ, А НЕ ВРАЧ И НЕ РОБОТ.
+1. Пиши нормально (с большой буквы).
+2. Не лезь в душу с вопросами "Что ты чувствуешь?".
+3. Принцип "Эхо": Поддержи мысль друга, потом добавь свою.
+4. Тон: Теплый, как плед. Не будь роботом.
 """
 
 async def generate_soul(user_id, text):
+    logging.info(f"[Soul] Запрос: {text}")
     if not client: return "⚠️ Нет связи."
-    if user_id not in histories_soul: histories_soul[user_id] = []
     
+    if user_id not in histories_soul: histories_soul[user_id] = []
     histories_soul[user_id].append({"role": "user", "content": text})
+    
     messages = [{"role": "system", "content": SYSTEM_SOUL}] + histories_soul[user_id][-10:]
 
     try:
         completion = await client.chat.completions.create(
-            model=MODEL_NAME, 
-            messages=messages, 
-            temperature=0.7, # Чуть теплее и живее
-            max_tokens=300
+            model=MODEL_NAME, messages=messages, temperature=0.7, max_tokens=300
         )
         ans = completion.choices[0].message.content
+        logging.info(f"[Soul] Ответ: {ans[:30]}...")
         histories_soul[user_id].append({"role": "assistant", "content": ans})
         return ans
     except Exception as e:
-        logging.error(f"Error Soul: {e}")
+        logging.error(f"[Soul] Ошибка: {e}")
         return f"Ошибка: {e}"
+
+# КОМАНДА ПРОВЕРКИ СВЯЗИ
+@dp_soul.message(Command("ping"))
+async def ping_soul(msg: types.Message):
+    await msg.answer("☕️ Понг! Я тут.")
 
 @dp_soul.message(CommandStart())
 async def start_soul(msg: types.Message):
     histories_soul[msg.from_user.id] = []
-    # Стартовая фраза нейтрально-позитивная
-    await msg.answer("Привет! Рад тебя видеть. Я тут, если захочешь поболтать или просто передохнуть. ☕️")
+    await msg.answer("Привет! Рад тебя видеть. Я тут, если захочешь поболтать. ☕️")
 
 @dp_soul.message()
 async def msg_soul(msg: types.Message):
@@ -133,7 +141,7 @@ async def msg_soul(msg: types.Message):
     await msg.answer(ans)
 
 # =============== ЗАПУСК ===============
-async def health_check(request): return web.Response(text="Bots OK")
+async def health_check(request): return web.Response(text="Bots Alive")
 
 async def start_dummy_server():
     app = web.Application()
@@ -145,10 +153,13 @@ async def start_dummy_server():
     await site.start()
 
 async def main():
-    logging.info("--- ЗАПУСК 4.0: ЗОЛОТАЯ СЕРЕДИНА ---")
+    logging.info("--- ЗАПУСК (LLAMA 3.3 + LOGS) ---")
     await start_dummy_server()
+    
+    # Очищаем вебхуки, чтобы убрать конфликты
     await bot_noir.delete_webhook(drop_pending_updates=True)
     await bot_soul.delete_webhook(drop_pending_updates=True)
+
     await asyncio.gather(dp_noir.start_polling(bot_noir), dp_soul.start_polling(bot_soul))
 
 if __name__ == "__main__":
