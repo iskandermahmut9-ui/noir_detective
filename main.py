@@ -12,8 +12,8 @@ from google.genai import types as g_types
 
 # =============== НАСТРОЙКИ ===============
 # Вставь свои ключи сюда или загрузи из os.getenv
-TG_TOKEN = "ТВОЙ_ТОКЕН_ТЕЛЕГРАМ" 
-GEMINI_KEY = "ТВОЙ_КЛЮЧ_GEMINI_AIza..."
+TG_TOKEN = "8544466606:AAEByDz2LYeLflfslL8giEom23wkGeWKJfc" 
+GEMINI_KEY = "AIzaSyBDN1RNIjDRzwr050LHKFNv_a0rq-3ME-M"
 
 # Настройка модели
 MODEL_ID = "gemini-1.5-flash" # Рабочая лошадка
