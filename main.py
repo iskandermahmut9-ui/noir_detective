@@ -2,17 +2,13 @@ import asyncio
 import logging
 import os
 import random
-import time
+import google.generativeai as genai 
 from aiohttp import web
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import CommandStart
 from aiogram.enums import ParseMode
 from aiogram.client.bot import DefaultBotProperties
-
-# === ИСПОЛЬЗУЕМ НОВУЮ БИБЛИОТЕКУ (для работы с двумя ключами) ===
-from google import genai
-from google.genai import types as g_types
-from google.genai.errors import ClientError # Для отлова ошибок лимитов
+from google.api_core import exceptions as google_exceptions
 
 # =============== НАСТРОЙКИ ===============
 TG_TOKEN_NOIR = os.getenv("TG_TOKEN_NOIR")
@@ -20,63 +16,60 @@ GEMINI_KEY_NOIR = os.getenv("GEMINI_KEY_NOIR")
 TG_TOKEN_SOUL = os.getenv("TG_TOKEN_SOUL")
 GEMINI_KEY_SOUL = os.getenv("GEMINI_KEY_SOUL")
 
-# ✅ ИСПРАВЛЕНИЕ 1: Используем стабильную модель 1.5 Flash
-MODEL_ID = "gemini-1.5-flash"
+# Используем точное имя стабильной модели
+MODEL_NAME = "gemini-1.5-flash"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
 
-# Логирование ключей
-def log_key_status(name, key):
-    if key: logging.info(f"✅ {name} найден: {key[:4]}...")
-    else: logging.error(f"❌ {name} НЕ НАЙДЕН!")
+# 🔒 ЗАМОК: Старая библиотека не умеет работать с двумя ключами одновременно
+# Мы будем переключать ключи "по очереди" с помощью этого замка.
+genai_lock = asyncio.Lock()
 
 # =============== ЛОГИКА 1: ДЕТЕКТИВ (NOIR) ===============
 bot_noir = Bot(token=TG_TOKEN_NOIR, default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN))
 dp_noir = Dispatcher()
-client_noir = None
 histories_noir = {}
 
-SYSTEM_NOIR = """
-Ты — ведущий квеста "Нуар-Детектив" (1940-е).
-Веди игру, описывай сцены. Отвечай просто текстом.
-"""
+SYSTEM_NOIR = "Ты — ведущий квеста 'Нуар-Детектив' (1940-е). Веди игру, описывай мрачные сцены, дождь, улики. Отвечай кратко и стильно."
 
 async def generate_noir(user_id, text):
-    if not client_noir: return "🕵️‍♂️ Ошибка: Нет ключа API."
+    if not GEMINI_KEY_NOIR: return "🕵️‍♂️ Ошибка: Нет ключа API."
     
-    # Инициализация истории
-    if user_id not in histories_noir: histories_noir[user_id] = []
-    histories_noir[user_id].append(g_types.Content(role="user", parts=[g_types.Part.from_text(text=text)]))
-    # Чистим память (последние 20 сообщений)
-    if len(histories_noir[user_id]) > 20: histories_noir[user_id] = histories_noir[user_id][-20:]
+    # История сообщений в формате старой библиотеки
+    if user_id not in histories_noir: 
+        histories_noir[user_id] = [
+            {"role": "user", "parts": ["Вводная: мы в детективном агентстве."]},
+            {"role": "model", "parts": ["Понял. Дождь барабанит по стеклу..."]}
+        ]
+    
+    histories_noir[user_id].append({"role": "user", "parts": [text]})
+    if len(histories_noir[user_id]) > 20: 
+        histories_noir[user_id] = histories_noir[user_id][-20:]
 
-    # ✅ ИСПРАВЛЕНИЕ 2: Retry Logic (Повторные попытки при ошибке 429)
-    max_retries = 3
-    for attempt in range(max_retries):
+    # Входим в защищенный блок кода
+    async with genai_lock:
         try:
-            resp = client_noir.models.generate_content(
-                model=MODEL_ID,
-                contents=histories_noir[user_id],
-                config=g_types.GenerateContentConfig(system_instruction=SYSTEM_NOIR)
-            )
-            bot_response = resp.text
-            histories_noir[user_id].append(g_types.Content(role="model", parts=[g_types.Part.from_text(text=bot_response)]))
-            return bot_response
+            # 1. Настраиваем библиотеку на ключ Нуара
+            genai.configure(api_key=GEMINI_KEY_NOIR)
+            
+            # 2. Создаем модель
+            model = genai.GenerativeModel(MODEL_NAME, system_instruction=SYSTEM_NOIR)
+            
+            # 3. Запускаем чат с историей (кроме последнего сообщения, которое отправим сейчас)
+            chat = model.start_chat(history=histories_noir[user_id][:-1])
+            
+            # 4. Генерируем ответ
+            response = await chat.send_message_async(text)
+            
+            ans = response.text
+            histories_noir[user_id].append({"role": "model", "parts": [ans]})
+            return ans
 
-        except ClientError as e:
-            error_str = str(e)
-            if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
-                logging.warning(f"⚠️ Лимит запросов (429). Ждем 10 сек... Попытка {attempt+1}/{max_retries}")
-                await asyncio.sleep(10) # Ждем и пробуем снова
-                continue
-            else:
-                logging.error(f"Error Noir: {e}")
-                return f"🕵️‍♂️ Сбой архивов: {e}"
+        except google_exceptions.ResourceExhausted:
+            return "🕵️‍♂️ (Кашель) Слишком много дел... Дай мне минуту перевести дух. (Лимит 429)"
         except Exception as e:
-            logging.error(f"Unknown Error Noir: {e}")
-            return f"Ошибка: {e}"
-    
-    return "🕵️‍♂️ Система перегружена. Попробуй через минуту."
+            logging.error(f"Error Noir: {e}")
+            return f"🕵️‍♂️ Ошибка связи: {e}"
 
 def get_start_image():
     seed = random.randint(1, 10000)
@@ -86,7 +79,7 @@ def get_start_image():
 async def start_noir(msg: types.Message):
     histories_noir[msg.from_user.id] = []
     await msg.answer_photo(get_start_image(), caption="🎷 *Дело открыто...*")
-    text = await generate_noir(msg.from_user.id, "Начни игру. Введи меня в курс дела.")
+    text = await generate_noir(msg.from_user.id, "Начни игру. Кто я и где я?")
     await msg.answer(text)
 
 @dp_noir.message()
@@ -98,48 +91,36 @@ async def msg_noir(msg: types.Message):
 # =============== ЛОГИКА 2: ПСИХОЛОГ (SOUL) ===============
 bot_soul = Bot(token=TG_TOKEN_SOUL, default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN))
 dp_soul = Dispatcher()
-client_soul = None
 histories_soul = {}
 
-SYSTEM_SOUL = """
-Ты — друг Соул. Тон: теплый, поддерживающий, эмпатичный.
-Задавай вопросы, чтобы человек раскрылся. Отвечай мягко.
-"""
+SYSTEM_SOUL = "Ты — друг Соул. Тон: теплый, поддерживающий, эмпатичный. Задавай вопросы, чтобы человек раскрылся."
 
 async def generate_soul(user_id, text):
-    if not client_soul: return "⚠️ Ошибка: Нет ключа API."
+    if not GEMINI_KEY_SOUL: return "⚠️ Ошибка: Нет ключа API."
 
     if user_id not in histories_soul: histories_soul[user_id] = []
-    histories_soul[user_id].append(g_types.Content(role="user", parts=[g_types.Part.from_text(text=text)]))
+    histories_soul[user_id].append({"role": "user", "parts": [text]})
     if len(histories_soul[user_id]) > 30: histories_soul[user_id] = histories_soul[user_id][-30:]
 
-    # ✅ ИСПРАВЛЕНИЕ 2: Retry Logic для Соула
-    max_retries = 3
-    for attempt in range(max_retries):
+    # Входим в защищенный блок кода
+    async with genai_lock:
         try:
-            resp = client_soul.models.generate_content(
-                model=MODEL_ID,
-                contents=histories_soul[user_id],
-                config=g_types.GenerateContentConfig(system_instruction=SYSTEM_SOUL)
-            )
-            bot_response = resp.text
-            histories_soul[user_id].append(g_types.Content(role="model", parts=[g_types.Part.from_text(text=bot_response)]))
-            return bot_response
+            # 1. Настраиваем библиотеку на ключ Соула
+            genai.configure(api_key=GEMINI_KEY_SOUL)
+            model = genai.GenerativeModel(MODEL_NAME, system_instruction=SYSTEM_SOUL)
+            
+            chat = model.start_chat(history=histories_soul[user_id][:-1])
+            response = await chat.send_message_async(text)
+            
+            ans = response.text
+            histories_soul[user_id].append({"role": "model", "parts": [ans]})
+            return ans
 
-        except ClientError as e:
-            error_str = str(e)
-            if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
-                logging.warning(f"⚠️ Soul Лимит (429). Ждем 10 сек... Попытка {attempt+1}")
-                await asyncio.sleep(10)
-                continue
-            else:
-                logging.error(f"🔥 Error Soul: {e}")
-                return f"Прости, я отвлекся... (Ошибка API: {e})"
+        except google_exceptions.ResourceExhausted:
+            return "Прости, я немного устал... Давай помолчим минутку? (Лимит API)"
         except Exception as e:
-            logging.error(f"Unknown Error Soul: {e}")
-            return f"Ошибка: {e}"
-
-    return "Прости, мысли путаются (слишком много запросов). Давай чуть позже? ☕️"
+            logging.error(f"Error Soul: {e}")
+            return f"Я тебя не слышу... (Ошибка: {e})"
 
 @dp_soul.message(CommandStart())
 async def start_soul(msg: types.Message):
@@ -153,7 +134,7 @@ async def msg_soul(msg: types.Message):
     await msg.answer(ans)
 
 # =============== ЗАПУСК ===============
-async def health_check(request): return web.Response(text="Bots alive!")
+async def health_check(request): return web.Response(text="Bots alive (Old Lib)!")
 
 async def start_dummy_server():
     app = web.Application()
@@ -165,21 +146,8 @@ async def start_dummy_server():
     await site.start()
 
 async def main():
-    global client_noir, client_soul
-    
-    logging.info("--- ЗАПУСК 2.0 (Fixed) ---")
-    log_key_status("TG_NOIR", TG_TOKEN_NOIR)
-    log_key_status("GEMINI_NOIR", GEMINI_KEY_NOIR)
-    log_key_status("TG_SOUL", TG_TOKEN_SOUL)
-    log_key_status("GEMINI_SOUL", GEMINI_KEY_SOUL)
-
-    # Инициализация клиентов (Новая библиотека)
-    if GEMINI_KEY_NOIR: client_noir = genai.Client(api_key=GEMINI_KEY_NOIR)
-    if GEMINI_KEY_SOUL: client_soul = genai.Client(api_key=GEMINI_KEY_SOUL)
-
+    logging.info("--- ЗАПУСК ПОСЛЕ РАБОТЫ НАД ОШИБКАМИ ---")
     await start_dummy_server()
-    logging.info("🚀 БОТЫ ЗАПУЩЕНЫ И ГОТОВЫ К РАБОТЕ")
-    
     await asyncio.gather(
         dp_noir.start_polling(bot_noir),
         dp_soul.start_polling(bot_soul)
