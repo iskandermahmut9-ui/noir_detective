@@ -11,9 +11,15 @@ from google import genai
 from google.genai import types as g_types
 
 # =============== НАСТРОЙКИ ===============
-# Вставь свои ключи сюда или загрузи из os.getenv
-TG_TOKEN = "8544466606:AAEByDz2LYeLflfslL8giEom23wkGeWKJfc" 
-GEMINI_KEY = "AIzaSyBDN1RNIjDRzwr050LHKFNv_a0rq-3ME-M"
+# os.getenv берет ключ из настроек сервера (Render), а не из этого файла
+TG_TOKEN = os.getenv("TELEGRAM_TOKEN")
+GEMINI_KEY = os.getenv("GEMINI_API_KEY")
+
+# Проверка на всякий случай
+if not TG_TOKEN:
+    print("Ошибка: Токен Telegram не найден!")
+if not GEMINI_KEY:
+    print("Ошибка: Ключ Gemini не найден!")
 
 # Настройка модели
 MODEL_ID = "gemini-1.5-flash" # Рабочая лошадка
