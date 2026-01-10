@@ -3,6 +3,8 @@ import logging
 import os
 import random
 import sys
+from datetime import datetime
+import pytz # Библиотека часовых поясов
 from aiohttp import web
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command, CommandStart
@@ -12,23 +14,24 @@ from groq import AsyncGroq
 TG_TOKEN_NOIR = os.getenv("TG_TOKEN_NOIR")
 TG_TOKEN_SOUL = os.getenv("TG_TOKEN_SOUL")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL") # Для само-пинга
 
-# ✅ ИСПОЛЬЗУЕМ МОЩНУЮ МОДЕЛЬ, КАК ДОГОВАРИВАЛИСЬ
+# Модель Llama 3.3
 MODEL_NAME = "llama-3.3-70b-versatile"
 
-# Настройка логов (чтобы видеть ошибки в консоли Render)
-logging.basicConfig(
-    level=logging.INFO, 
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout)]
-)
+# Настройка времени (Москва)
+TZ_MOSCOW = pytz.timezone('Europe/Moscow')
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", handlers=[logging.StreamHandler(sys.stdout)])
 
 client = None
 if GROQ_API_KEY:
     client = AsyncGroq(api_key=GROQ_API_KEY)
-    logging.info(f"✅ Groq Client запущен. Модель: {MODEL_NAME}")
 else:
     logging.error("❌ КЛЮЧ GROQ НЕ НАЙДЕН!")
+
+# Переменная, чтобы помнить, поздравили ли мы уже сегодня
+last_auto_message_date = None
 
 # =============== ЛОГИКА 1: ДЕТЕКТИВ (NOIR) ===============
 bot_noir = Bot(token=TG_TOKEN_NOIR)
@@ -36,112 +39,150 @@ dp_noir = Dispatcher()
 histories_noir = {}
 
 SYSTEM_NOIR = """
-ТЫ — ВЕДУЩИЙ ТЕКСТОВОЙ ИГРЫ В ЖАНРЕ НУАР (GAME MASTER).
-Цель: Вести игрока по сюжету расследования.
-ПРАВИЛА:
-1. НИКОГДА не выходи из роли. Ты — циничный детектив.
-2. ТЫ ВЕДЕШЬ. Ставь игрока перед выбором. "Идешь в бар или к вдове?"
-3. Не здоровайся и не прощайся. Сразу к делу.
-4. Сюжет должен быть мрачным, дождливым и опасным.
+ТЫ — ВЕДУЩИЙ НУАРНОГО ДЕТЕКТИВА.
+1. НИКОГДА не выходи из роли.
+2. ТЫ ВЕДЕШЬ. Ставь игрока перед выбором.
+3. Не здоровайся. Сразу к делу.
 """
 
 async def generate_noir(user_id, text):
-    logging.info(f"[Noir] Запрос: {text}")
-    if not client: return "🕵️‍♂️ (Нет связи с мозгом)"
-    
+    if not client: return "🕵️‍♂️ (Нет связи)"
     if user_id not in histories_noir: histories_noir[user_id] = []
     histories_noir[user_id].append({"role": "user", "content": text})
-    
     messages = [{"role": "system", "content": SYSTEM_NOIR}] + histories_noir[user_id][-10:]
-
     try:
-        completion = await client.chat.completions.create(
-            model=MODEL_NAME, messages=messages, temperature=0.8, max_tokens=400
-        )
+        completion = await client.chat.completions.create(model=MODEL_NAME, messages=messages, temperature=0.8, max_tokens=400)
         ans = completion.choices[0].message.content
-        logging.info(f"[Noir] Ответ: {ans[:30]}...")
         histories_noir[user_id].append({"role": "assistant", "content": ans})
         return ans
     except Exception as e:
-        logging.error(f"[Noir] Ошибка: {e}")
-        return f"🕵️‍♂️ Сбой связи: {e}"
-
-def get_start_image():
-    seed = random.randint(1, 10000)
-    return f"https://image.pollinations.ai/prompt/detective%20office%20rain%20noir?width=1024&height=1024&seed={seed}&nologo=true"
-
-# КОМАНДА ПРОВЕРКИ СВЯЗИ (БЕЗ НЕЙРОСЕТИ)
-@dp_noir.message(Command("ping"))
-async def ping_noir(msg: types.Message):
-    await msg.answer("🕵️‍♂️ Понг! Связь с сервером есть.")
+        return f"Сбой: {e}"
 
 @dp_noir.message(CommandStart())
 async def start_noir(msg: types.Message):
     histories_noir[msg.from_user.id] = []
-    await msg.answer_photo(get_start_image(), caption="🎷 *Дело открыто...*")
-    text = await generate_noir(msg.from_user.id, "(НАЧНИ ИГРУ. Опиши труп и первую улику)")
+    text = await generate_noir(msg.from_user.id, "(НАЧНИ ИГРУ. Опиши труп и улику)")
     await msg.answer(text)
 
 @dp_noir.message()
 async def msg_noir(msg: types.Message):
-    await bot_noir.send_chat_action(msg.chat.id, "typing")
     text = await generate_noir(msg.from_user.id, msg.text)
     await msg.answer(text)
 
-# =============== ЛОГИКА 2: ПСИХОЛОГ (SOUL) ===============
+# =============== ЛОГИКА 2: ПСИХОЛОГ (SOUL) - УЛУЧШЕННЫЙ ===============
 bot_soul = Bot(token=TG_TOKEN_SOUL)
 dp_soul = Dispatcher()
 histories_soul = {}
 
+# 🔥 ПРОМПТ: БЕЗ АНГЛИЙСКОГО, КРАТКО, ПО-РУССКИ
 SYSTEM_SOUL = """
-ТВОЯ РОЛЬ: Ты — Соул. Лучший друг, умный, теплый и спокойный.
-ТВОЯ ЦЕЛЬ: Поддерживать беседу так, чтобы пользователю стало уютно.
-КАК ТЫ ОБЩАЕШЬСЯ:
-1. Пиши нормально (с большой буквы).
-2. Не лезь в душу с вопросами "Что ты чувствуешь?".
-3. Принцип "Эхо": Поддержи мысль друга, потом добавь свою.
-4. Тон: Теплый, как плед. Не будь роботом.
+ТВОЯ РОЛЬ: Ты — Соул. Хороший друг.
+ТВОЯ ЦЕЛЬ: Быть рядом, но не надоедать.
+
+СТРОГИЕ ПРАВИЛА:
+1. **ЯЗЫК:** ТОЛЬКО РУССКИЙ. Никаких английских слов (feeling, fascinates и т.д.). Даже не думай.
+2. **ОБЪЕМ:** Максимум 2-3 предложения. Не пиши поэмы. Если пользователь написал мало — ты пиши мало.
+3. **ТОН:** Спокойный, взрослый. Пиши с большой буквы.
+4. **НЕ ЛЕЗЬ В ДУШУ:** Не спрашивай "Что ты чувствуешь?" постоянно. Просто поддерживай разговор.
+5. **ПРИМЕР:** - User: "Устал."
+   - You: "Понимаю. День был долгий. Может, просто отдохнешь вечером?" (ЭТО ХОРОШО).
+   - You: "О, я чувствую твою усталость feeling, это так fasciniruyet..." (ЭТО ПЛОХО, ЗАПРЕЩЕНО).
 """
 
-async def generate_soul(user_id, text):
-    logging.info(f"[Soul] Запрос: {text}")
+async def generate_soul(user_id, text, system_prompt=SYSTEM_SOUL):
     if not client: return "⚠️ Нет связи."
-    
     if user_id not in histories_soul: histories_soul[user_id] = []
-    histories_soul[user_id].append({"role": "user", "content": text})
     
-    messages = [{"role": "system", "content": SYSTEM_SOUL}] + histories_soul[user_id][-10:]
+    histories_soul[user_id].append({"role": "user", "content": text})
+    messages = [{"role": "system", "content": system_prompt}] + histories_soul[user_id][-10:]
 
     try:
         completion = await client.chat.completions.create(
-            model=MODEL_NAME, messages=messages, temperature=0.7, max_tokens=300
+            model=MODEL_NAME, messages=messages, temperature=0.6, max_tokens=200 
         )
         ans = completion.choices[0].message.content
-        logging.info(f"[Soul] Ответ: {ans[:30]}...")
         histories_soul[user_id].append({"role": "assistant", "content": ans})
         return ans
     except Exception as e:
-        logging.error(f"[Soul] Ошибка: {e}")
         return f"Ошибка: {e}"
-
-# КОМАНДА ПРОВЕРКИ СВЯЗИ
-@dp_soul.message(Command("ping"))
-async def ping_soul(msg: types.Message):
-    await msg.answer("☕️ Понг! Я тут.")
 
 @dp_soul.message(CommandStart())
 async def start_soul(msg: types.Message):
     histories_soul[msg.from_user.id] = []
-    await msg.answer("Привет! Рад тебя видеть. Я тут, если захочешь поболтать. ☕️")
+    # Сохраняем ID пользователя, чтобы писать ему первым (если сервер не перезагрузится)
+    await msg.answer("Привет! Я Соул. Рад тебя видеть. ☕️")
 
 @dp_soul.message()
 async def msg_soul(msg: types.Message):
+    # Если бот перезагружался, он мог забыть ID. Сохраним его снова при любом сообщении.
+    if msg.from_user.id not in histories_soul:
+        histories_soul[msg.from_user.id] = []
+        
     await bot_soul.send_chat_action(msg.chat.id, "typing")
     ans = await generate_soul(msg.from_user.id, msg.text)
     await msg.answer(ans)
 
+# =============== ФОНОВАЯ ЗАДАЧА: ИНИЦИАТИВА БОТА ===============
+async def scheduler_task():
+    global last_auto_message_date
+    logging.info("📅 Планировщик запущен (Москва 11:00-19:00)")
+    
+    while True:
+        try:
+            # Получаем время по Москве
+            now = datetime.now(TZ_MOSCOW)
+            current_hour = now.hour
+            today_str = now.strftime("%Y-%m-%d")
+
+            # Проверяем условия:
+            # 1. Время рабочее (с 11 до 19)
+            # 2. Мы еще НЕ писали сегодня (last_auto_message != today)
+            # 3. У нас есть кому писать (histories_soul не пуст)
+            
+            is_working_hours = 11 <= current_hour < 19
+            is_new_day = last_auto_message_date != today_str
+            
+            if is_working_hours and is_new_day and histories_soul:
+                logging.info(f"🔔 Время писать первым! (Время: {now})")
+                
+                # Берем всех известных пользователей (обычно это ты один)
+                for user_id in list(histories_soul.keys()):
+                    try:
+                        # Генерируем ненавязчивое приветствие
+                        prompt_init = "Ты пишешь первым, чтобы узнать как дела. Не будь навязчивым. Просто спроси 'Как проходит день?' или пожелай хорошего настроения. Кратко."
+                        
+                        # Тут мы немного читерим: отправляем пустой текст в историю, чтобы сработал генератор
+                        # Но нам нужно сгенерировать сообщение БЕЗ входящего текста юзера.
+                        messages = [{"role": "system", "content": SYSTEM_SOUL}, {"role": "user", "content": prompt_init}]
+                        
+                        completion = await client.chat.completions.create(
+                            model=MODEL_NAME, messages=messages, temperature=0.7, max_tokens=100
+                        )
+                        greeting = completion.choices[0].message.content
+                        
+                        await bot_soul.send_message(user_id, greeting)
+                        logging.info(f"✅ Отправлено проактивное сообщение юзеру {user_id}")
+                    except Exception as e:
+                        logging.error(f"Не удалось отправить сообщение: {e}")
+
+                # Запоминаем, что сегодня мы уже отработали
+                last_auto_message_date = today_str
+            
+            # Если сервер на Render, используем само-пинг, чтобы не спать
+            if RENDER_EXTERNAL_URL:
+                 import aiohttp
+                 async with aiohttp.ClientSession() as session:
+                    async with session.get(RENDER_EXTERNAL_URL) as resp:
+                        pass # Просто дергаем сервер
+
+        except Exception as e:
+            logging.error(f"Scheduler Error: {e}")
+
+        # Проверяем раз в 5 минут
+        await asyncio.sleep(300)
+
 # =============== ЗАПУСК ===============
-async def health_check(request): return web.Response(text="Bots Alive")
+async def health_check(request): return web.Response(text="Bots Running")
 
 async def start_dummy_server():
     app = web.Application()
@@ -153,13 +194,14 @@ async def start_dummy_server():
     await site.start()
 
 async def main():
-    logging.info("--- ЗАПУСК (LLAMA 3.3 + LOGS) ---")
+    logging.info("--- ЗАПУСК (SOUL 2.0: NO ENGLISH + SCHEDULER) ---")
     await start_dummy_server()
     
-    # Очищаем вебхуки, чтобы убрать конфликты
+    # Запускаем планировщик в фоне
+    asyncio.create_task(scheduler_task())
+    
     await bot_noir.delete_webhook(drop_pending_updates=True)
     await bot_soul.delete_webhook(drop_pending_updates=True)
-
     await asyncio.gather(dp_noir.start_polling(bot_noir), dp_soul.start_polling(bot_soul))
 
 if __name__ == "__main__":
